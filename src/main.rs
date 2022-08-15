@@ -144,7 +144,7 @@ impl<'a> App<'a> {
         Ok(())
     }
     fn mod_1(&mut self, f: impl FnOnce(StackEntry<'a>) -> Option<StackEntry<'a>>) -> Result<()> {
-        if let Some(value) = self.pop().ok().and_then(|x| f(x)) {
+        if let Some(value) = self.pop().ok().and_then(f) {
             Ok(self.push(value)?)
         } else {
             Err(self.empty_stack())
@@ -420,9 +420,7 @@ fn eval(app: &mut App, line: Vec<impl AsRef<str>>) -> Result<()> {
                 let value = s.strip_prefix('/').unwrap().to_owned();
                 app.push(StackEntry::String(Cow::Owned(value)))
             }
-            s if app.cvars.contains_key(s) => {
-                app.push(app.cvars.get(s).unwrap().clone())
-            }
+            s if app.cvars.contains_key(s) => app.push(app.cvars.get(s).unwrap().clone()),
             s if s.starts_with('"') && s.ends_with('"') => app.push(StackEntry::String(
                 Cow::Owned(s[1..(s.len() - 1)].to_string()),
             )),
@@ -431,7 +429,7 @@ fn eval(app: &mut App, line: Vec<impl AsRef<str>>) -> Result<()> {
                 Ok(())
             }
             "]" => {
-                app.end_set();
+                app.end_set()?;
                 Ok(())
             }
             _ => Err(anyhow!("{}: No such token", app.name)),

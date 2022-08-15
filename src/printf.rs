@@ -1,6 +1,7 @@
 use std::{
+    collections::VecDeque,
     fmt::{Display, LowerHex, Octal, Pointer, UpperHex},
-    num::ParseIntError, collections::VecDeque,
+    num::ParseIntError,
 };
 
 use anyhow::Result;
@@ -316,7 +317,7 @@ impl Format {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
     /// Not specified
     Empty,
@@ -423,7 +424,7 @@ impl Argument {
             }
             (Specifier::Char, Primitive::String(s)) => {
                 format_option = Some(String::new());
-                format_arg = Some(Primitive::Char(s.chars().next().unwrap_or_else(|| '\0')));
+                format_arg = Some(Primitive::Char(s.chars().next().unwrap_or('\0')));
             }
             _ => {
                 format_option = Some(String::new());
@@ -498,7 +499,7 @@ impl Specifier {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Notation {
     Auto,
     Normal,
@@ -506,7 +507,7 @@ pub enum Notation {
     Hex,
 }
 
-pub fn parse_format_argument<'a>(s: &'a str) -> IResult<&str, FormatArgument> {
+pub fn parse_format_argument(s: &str) -> IResult<&str, FormatArgument> {
     match alt::<_, _, nom::error::Error<_>, _>((tag("%%"), tag("%")))(s) {
         Ok((s, lit)) if lit == "%%" => Ok((s, FormatArgument::Left(lit.to_string()))),
         Ok((s, _)) => {

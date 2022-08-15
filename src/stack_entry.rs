@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use float_ord::FloatOrd;
 use md4::Digest;
-use nom::{multi::many0, Finish};
+use nom::multi::many0;
 
 use crate::printf::{parse_format_argument, Format};
 
@@ -80,7 +80,7 @@ impl<'a> Div<StackEntry<'a>> for StackEntry<'a> {
 impl<'a> Display for StackEntry<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(n) = self.as_int() {
-            return write!(f, "{}", n.to_string());
+            return write!(f, "{}", n);
         }
         use StackEntry::*;
         match self {
@@ -98,12 +98,10 @@ impl<'a> Display for StackEntry<'a> {
                         "{x}{}{acc}",
                         if acc.is_empty() {
                             ""
+                        } else if f.alternate() {
+                            " "
                         } else {
-                            if f.alternate() {
-                                " "
-                            } else {
-                                ", "
-                            }
+                            ", "
                         }
                     )),
                 if f.alternate() { "" } else { "]" },
@@ -118,9 +116,11 @@ impl<'a> StackEntry<'a> {
     pub fn num(n: f64) -> Self {
         Self::Number(FloatOrd(n))
     }
+
     pub fn as_int(&self) -> Option<isize> {
         self.try_as_int().ok()
     }
+
     pub fn try_as_int(&self) -> Result<isize> {
         self.try_as_number().and_then(|n| {
             if n.fract() == 0.0 {
@@ -132,16 +132,19 @@ impl<'a> StackEntry<'a> {
             }
         })
     }
+
     pub fn bool(self) -> bool {
         self.as_int().is_some_and(|f| f != &0)
     }
+
     pub fn hash<D: Digest>(&self) -> Vec<u8> {
         let mut hasher = D::new();
 
         hasher.update(self.to_string());
         hasher.finalize().to_vec()
     }
-    pub fn to_printf(self) -> Result<super::printf::Format> {
+
+    pub fn parse_printf(self) -> Result<super::printf::Format> {
         let str = self.try_into_string()?;
         // Bruh the E type has references
         let (_, fmt) =
@@ -165,27 +168,12 @@ impl<'a> StackEntry<'a> {
         }
     }
 
-    pub fn try_into_set(self) -> Result<BTreeSet<Self>> {
-        if let Self::Set(v) = self {
-            Ok(v)
-        } else {
-            Err(anyhow!("Invalid argument: expected Set, got {:?}", self))
-        }
-    }
-
-    /// Returns `true` if the stack entry is [`Md4`].
-    ///
-    /// [`Md4`]: StackEntry::Md4
-    #[must_use]
-    pub fn is_md4(&self) -> bool {
-        matches!(self, Self::Md4)
-    }
-
-    /// Returns `true` if the stack entry is [`Sha256`].
-    ///
-    /// [`Sha256`]: StackEntry::Sha256
-    #[must_use]
-    pub fn is_sha256(&self) -> bool {
-        matches!(self, Self::Sha256)
-    }
+    // Maybe needed at some point in the future
+    // pub fn try_into_set(self) -> Result<BTreeSet<Self>> {
+    //     if let Self::Set(v) = self {
+    //         Ok(v)
+    //     } else {
+    //         Err(anyhow!("Invalid argument: expected Set, got {:?}", self))
+    //     }
+    // }
 }
