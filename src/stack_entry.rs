@@ -5,10 +5,12 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
+use anyhow::{anyhow, Result};
 use float_ord::FloatOrd;
 use md4::Digest;
+use nom::{multi::many0, Finish};
 
-use crate::printf::parse_printf;
+use crate::printf::{parse_format_argument, Format};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum StackEntry<'a> {
@@ -54,9 +56,9 @@ impl<'a> Mul<StackEntry<'a>> for StackEntry<'a> {
         use StackEntry::*;
         match (self, &rhs) {
             (Number(x), Number(y)) => Some(Number(FloatOrd(x.0 * y.0))),
-            (String(x), Number(FloatOrd(n))) if n > &0.0 => {
-                rhs.int().map(|n| String(Cow::Owned(x.repeat(n as usize))))
-            }
+            (String(x), Number(FloatOrd(n))) if n > &0.0 => rhs
+                .as_int()
+                .map(|n| String(Cow::Owned(x.repeat(n as usize)))),
             _ => None,
         }
     }
@@ -77,7 +79,7 @@ impl<'a> Div<StackEntry<'a>> for StackEntry<'a> {
 
 impl<'a> Display for StackEntry<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(n) = self.int() {
+        if let Some(n) = self.as_int() {
             return write!(f, "{}", n.to_string());
         }
         use StackEntry::*;
@@ -116,26 +118,22 @@ impl<'a> StackEntry<'a> {
     pub fn num(n: f64) -> Self {
         Self::Number(FloatOrd(n))
     }
-    pub fn flt(&self) -> Option<f64> {
-        if let Self::Number(x) = self {
-            Some(x.0)
-        } else {
-            None
-        }
+    pub fn as_int(&self) -> Option<isize> {
+        self.try_as_int().ok()
     }
-    pub fn int(&self) -> Option<isize> {
-        self.flt().and_then(|n| {
+    pub fn try_as_int(&self) -> Result<isize> {
+        self.try_as_number().and_then(|n| {
             if n.fract() == 0.0 {
                 // SAFETY: checked for whole number, returns an isize, which is guaranteed to fit
                 // every whole number between f64::MIN and f64::MAX
-                Some(unsafe { n.to_int_unchecked() })
+                Ok(unsafe { n.to_int_unchecked() })
             } else {
-                None
+                Err(anyhow!("Failed to convert float into integer."))
             }
         })
     }
-    pub fn bool(&self) -> bool {
-        self.int().is_some_and(|f| f != &0)
+    pub fn bool(self) -> bool {
+        self.as_int().is_some_and(|f| f != &0)
     }
     pub fn hash<D: Digest>(&self) -> Vec<u8> {
         let mut hasher = D::new();
@@ -143,16 +141,51 @@ impl<'a> StackEntry<'a> {
         hasher.update(self.to_string());
         hasher.finalize().to_vec()
     }
-    pub fn to_printf(self) -> Option<super::printf::Format> {
-        if let StackEntry::String(format) = self {
-            match parse_printf(&format) {
-                Ok((_, format)) => return Some(format),
-                Err(e) => {
-                    eprintln!("rpn: Couldn't parse printf: {e}");
-                    return None;
-                }
-            }
+    pub fn to_printf(self) -> Result<super::printf::Format> {
+        let str = self.try_into_string()?;
+        // Bruh the E type has references
+        let (_, fmt) =
+            many0(parse_format_argument)(&str).map_err(|x| anyhow!("printf: {}", x.to_string()))?;
+        Ok(Format(fmt))
+    }
+
+    pub fn try_as_number(&self) -> Result<f64> {
+        if let Self::Number(FloatOrd(v)) = self {
+            Ok(*v)
+        } else {
+            Err(anyhow!("Invalid argument: expected Number, got {:?}", self))
         }
-        None
+    }
+
+    pub fn try_into_string(self) -> Result<String> {
+        if let Self::String(v) = self {
+            Ok(v.to_string())
+        } else {
+            Err(anyhow!("Invalid argument: expected String, got {:?}", self))
+        }
+    }
+
+    pub fn try_into_set(self) -> Result<BTreeSet<Self>> {
+        if let Self::Set(v) = self {
+            Ok(v)
+        } else {
+            Err(anyhow!("Invalid argument: expected Set, got {:?}", self))
+        }
+    }
+
+    /// Returns `true` if the stack entry is [`Md4`].
+    ///
+    /// [`Md4`]: StackEntry::Md4
+    #[must_use]
+    pub fn is_md4(&self) -> bool {
+        matches!(self, Self::Md4)
+    }
+
+    /// Returns `true` if the stack entry is [`Sha256`].
+    ///
+    /// [`Sha256`]: StackEntry::Sha256
+    #[must_use]
+    pub fn is_sha256(&self) -> bool {
+        matches!(self, Self::Sha256)
     }
 }

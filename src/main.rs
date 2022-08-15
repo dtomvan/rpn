@@ -8,7 +8,7 @@
 
 mod printf;
 mod stack_entry;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{Local, Utc};
 use printf::Primitive;
 use rand::{
@@ -41,7 +41,7 @@ struct App<'a> {
     name: String,
     not_set_ptrs: VecDeque<isize>,
     start_time: Instant,
-    cvars: HashMap<Cow<'a, str>, StackEntry<'a>>,
+    cvars: HashMap<String, StackEntry<'a>>,
     database: VecDeque<StackEntry<'a>>,
     rng: ThreadRng,
 }
@@ -59,55 +59,55 @@ impl<'a> App<'a> {
             rng: rand::thread_rng(),
         }
     }
-    fn empty_stack(&self) {
-        eprintln!("{}: empty stack", self.name);
+    // TODO: Maybe make this an enum?
+    fn empty_stack(&self) -> anyhow::Error {
+        anyhow!("{}: empty stack", self.name)
     }
-    fn stack_underflow() {
-        eprintln!("Warning: stack underflow");
+    fn stack_underflow() -> anyhow::Error {
+        anyhow!("Warning: stack underflow")
     }
-    fn stack_overflow() {
-        eprintln!("Warning: stack overflow");
+    fn stack_overflow() -> anyhow::Error {
+        anyhow!("Warning: stack overflow")
     }
-    fn push(&mut self, value: StackEntry<'a>) {
+    fn push(&mut self, value: StackEntry<'a>) -> Result<()> {
         if self.stack_ptr < (MAX_STACK_SIZE - 1) as isize {
             self.stack_ptr += 1;
             self.stack[self.stack_ptr as usize] = MaybeUninit::new(value);
+            Ok(())
         } else {
-            Self::stack_overflow();
+            Err(Self::stack_overflow())
         }
     }
-    fn pop(&mut self) -> Option<StackEntry<'a>> {
+    fn pop(&mut self) -> Result<StackEntry<'a>> {
         if self.stack_ptr >= 0 {
             let value = unsafe { self.stack[self.stack_ptr as usize].assume_init_read() };
             self.stack[self.stack_ptr as usize] = MaybeUninit::uninit();
             self.stack_ptr -= 1;
-            Some(value)
+            Ok(value)
         } else {
-            Self::stack_underflow();
-            None
+            Err(Self::stack_underflow())
         }
     }
-    fn pop2(&mut self) -> Option<[StackEntry<'a>; 2]> {
+    fn pop2(&mut self) -> Result<[StackEntry<'a>; 2]> {
         self.pop().and_then(|x| self.pop().map(|y| [x, y]))
     }
-    fn pop3(&mut self) -> Option<[StackEntry<'a>; 3]> {
+    fn pop3(&mut self) -> Result<[StackEntry<'a>; 3]> {
         self.pop2().and_then(|[x, y]| self.pop().map(|z| [x, y, z]))
     }
     // used for bound command
-    fn flt3(&mut self) -> Option<[f64; 3]> {
+    fn flt3(&mut self) -> Result<[f64; 3]> {
         self.pop3().and_then(|x| {
-            let op: Vec<_> = x.into_iter().map(|x| x.flt()).collect();
+            let op: Vec<_> = x.into_iter().map(|x| x.try_as_number().ok()).collect();
             let all = op.iter().all(|x| x.is_some());
             if all {
-                Some(
-                    op.into_iter()
-                        .map(|x| x.unwrap())
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .expect("Wrong array size. Bug in pop3?"),
-                )
+                Ok(op
+                    .into_iter()
+                    .map(|x| x.unwrap())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("Wrong array size. Bug in pop3?"))
             } else {
-                None
+                Err(anyhow!("Not enough floats on the stack"))
             }
         })
     }
@@ -118,9 +118,9 @@ impl<'a> App<'a> {
         }
         debug_assert_eq!(self.stack_ptr, -1, "Stack has to be empty after clearing.");
     }
-    fn dup(&mut self) {
+    fn dup(&mut self) -> Result<()> {
         if self.stack_ptr < 0 {
-            return Self::stack_underflow();
+            return Err(Self::stack_underflow());
         }
         // SAFETY: provided that stack_ptr was managed correctly (which is done
         // in push, pop and dup), and stack_ptr was initialized as -1;
@@ -130,76 +130,89 @@ impl<'a> App<'a> {
             self.stack[self.stack_ptr as usize]
                 .assume_init_ref()
                 .clone()
-        });
+        })?;
+        Ok(())
     }
-    fn exch(&mut self) {
+    fn exch(&mut self) -> Result<()> {
         if self.stack_ptr < 1 {
-            return Self::stack_underflow();
+            return Err(Self::stack_underflow());
         }
         let first = self.pop().unwrap();
         let second = self.pop().unwrap();
-        self.push(first);
-        self.push(second);
+        self.push(first)?;
+        self.push(second)?;
+        Ok(())
     }
-    fn mod_1(&mut self, f: impl FnOnce(StackEntry<'a>) -> Option<StackEntry<'a>>) {
-        if let Some(value) = self.pop().and_then(|x| f(x)) {
-            self.push(value);
+    fn mod_1(&mut self, f: impl FnOnce(StackEntry<'a>) -> Option<StackEntry<'a>>) -> Result<()> {
+        if let Some(value) = self.pop().ok().and_then(|x| f(x)) {
+            Ok(self.push(value)?)
         } else {
-            self.empty_stack();
+            Err(self.empty_stack())
         }
     }
-    fn nmod_1(&mut self, f: impl FnOnce(isize) -> isize) {
-        self.mod_1(|x| x.int().map(|x| StackEntry::num(f(x) as f64)));
+    fn nmod_1(&mut self, f: impl FnOnce(isize) -> isize) -> Result<()> {
+        self.mod_1(|x| x.try_as_int().ok().map(|x| StackEntry::num(f(x) as f64)))
     }
-    fn fmod_1(&mut self, f: impl FnOnce(f64) -> f64) {
-        self.mod_1(|x| x.flt().map(|x| StackEntry::num(f(x))));
+    fn fmod_1(&mut self, f: impl FnOnce(f64) -> f64) -> Result<()> {
+        self.mod_1(|x| x.try_as_number().ok().map(|x| StackEntry::num(f(x))))
     }
-    fn mod_2(&mut self, f: impl FnOnce(StackEntry<'a>, StackEntry<'a>) -> Option<StackEntry<'a>>) {
+    fn mod_2(
+        &mut self,
+        f: impl FnOnce(StackEntry<'a>, StackEntry<'a>) -> Option<StackEntry<'a>>,
+    ) -> Result<()> {
         if let Some(value) = self
             .pop()
-            .and_then(|second| self.pop().map(|first| (first, second)))
+            .ok()
+            .and_then(|second| self.pop().ok().map(|first| (first, second)))
             .and_then(|(x, y)| f(x, y))
         {
-            self.push(value);
+            Ok(self.push(value)?)
         } else {
-            self.empty_stack();
+            Err(self.empty_stack())
         }
     }
-    fn bmod_2(&mut self, f: impl FnOnce(bool, bool) -> bool) {
+    fn bmod_2(&mut self, f: impl FnOnce(bool, bool) -> bool) -> Result<()> {
         // cast bool -> int : true -> 1, false -> 2
         // cast 1 -> f64 : 1.0
         // cast 0 -> f64 : 0.0
         // thus casting bool -> int -> f64 -> 0.0 or 1.0
         self.mod_2(|x, y| Some(StackEntry::num(f(x.bool(), y.bool()) as u8 as f64)))
     }
-    fn fmod_2(&mut self, f: impl FnOnce(f64, f64) -> f64) {
-        self.mod_2(|x, y| x.flt().zip(y.flt()).map(|(x, y)| StackEntry::num(f(x, y))));
-    }
-    fn nmod_2(&mut self, f: impl FnOnce(isize, isize) -> isize) {
+    fn fmod_2(&mut self, f: impl FnOnce(f64, f64) -> f64) -> Result<()> {
         self.mod_2(|x, y| {
-            x.int()
-                .zip(y.int())
+            x.try_as_number()
+                .ok()
+                .zip(y.try_as_number().ok())
+                .map(|(x, y)| StackEntry::num(f(x, y)))
+        })
+    }
+    fn nmod_2(&mut self, f: impl FnOnce(isize, isize) -> isize) -> Result<()> {
+        self.mod_2(|x, y| {
+            x.try_as_int()
+                .ok()
+                .zip(y.try_as_int().ok())
                 .map(|(x, y)| StackEntry::num(f(x, y) as f64))
-        });
+        })
     }
-    fn modb_2(&mut self, f: impl FnOnce(StackEntry<'a>, StackEntry<'a>) -> bool) {
-        self.mod_2(|x, y| Some(StackEntry::num(if f(x, y) { 1.0 } else { 0.0 })));
+    fn modb_2(&mut self, f: impl FnOnce(StackEntry<'a>, StackEntry<'a>) -> bool) -> Result<()> {
+        self.mod_2(|x, y| Some(StackEntry::num(if f(x, y) { 1.0 } else { 0.0 })))
     }
-    fn bfmod_2(&mut self, f: impl FnOnce(f64, f64) -> bool) {
-        self.fmod_2(|x, y| if f(x, y) { 1.0 } else { 0.0 });
+    fn bfmod_2(&mut self, f: impl FnOnce(f64, f64) -> bool) -> Result<()> {
+        self.fmod_2(|x, y| if f(x, y) { 1.0 } else { 0.0 })
     }
     fn start_set(&mut self) {
         self.not_set_ptrs.push_front(self.stack_ptr);
     }
-    fn end_set(&mut self) {
+    fn end_set(&mut self) -> Result<()> {
         if let Some(not_set_ptr) = self.not_set_ptrs.pop_front() {
             let mut set = BTreeSet::new();
             while self.stack_ptr > not_set_ptr {
                 set.insert(self.pop().unwrap());
             }
-            self.push(StackEntry::Set(set));
+            self.push(StackEntry::Set(set))?;
+            Ok(())
         } else {
-            self.empty_stack();
+            Err(self.empty_stack())
         }
     }
 }
@@ -246,7 +259,9 @@ fn main() -> Result<()> {
 
     loop {
         let line = editor.readline(prompt.as_str())?;
-        eval(&mut app, line.split_whitespace().collect())?;
+        if let Err(e) = eval(&mut app, line.split_whitespace().collect()) {
+            eprintln!("Warning: evaluation errored: {e}");
+        }
         app.clear();
         if let Ok(ref path) = path {
             let _ = editor.save_history(&path);
@@ -255,38 +270,33 @@ fn main() -> Result<()> {
 }
 
 #[inline]
-fn return_date(app: &mut App, formatter: &mut dyn FnMut(&str) -> String) {
-    let format_string = app.pop();
-    if let Some(StackEntry::String(s)) = format_string {
-        app.push(StackEntry::String(Cow::Owned(formatter(&s))));
-    }
+fn return_date(app: &mut App, formatter: &mut dyn FnMut(&str) -> String) -> Result<()> {
+    let format_string = app.pop()?.try_into_string()?;
+    app.push(StackEntry::String(Cow::Owned(formatter(&format_string))))
 }
 
 fn eval(app: &mut App, line: Vec<impl AsRef<str>>) -> Result<()> {
     for command in line {
         match command.as_ref() {
             "pop" => {
-                app.pop();
+                app.pop()?;
+                Ok(())
             }
             "dup" => app.dup(),
             "exch" => app.exch(),
             "load" => {
-                let cvar = app.pop();
-                if let Some(StackEntry::String(s)) = cvar {
-                    let entry = app.cvars.get(&s);
-                    if let Some(entry) = entry {
-                        app.push(entry.clone());
-                    }
+                let cvar = app.pop().and_then(StackEntry::try_into_string)?;
+                let entry = app.cvars.get(&cvar);
+                if let Some(entry) = entry {
+                    app.push(entry.clone())?;
                 }
+                Ok(())
             }
             "def" | "=" => {
-                let value = app.pop();
-                let cvar = app.pop();
-                if let Some(StackEntry::String(s)) = cvar {
-                    if let Some(value) = value {
-                        app.cvars.insert(s, value);
-                    }
-                }
+                let value = app.pop()?;
+                let cvar = app.pop().and_then(StackEntry::try_into_string)?;
+                app.cvars.insert(cvar, value);
+                Ok(())
             }
             "add" | "+" | "union" => app.mod_2(Add::add),
             "sub" | "-" | "difference" => app.mod_2(Sub::sub),
@@ -311,126 +321,121 @@ fn eval(app: &mut App, line: Vec<impl AsRef<str>>) -> Result<()> {
             "abs" => app.fmod_1(|x| x.abs()),
             "sgn" => app.fmod_1(|x| x.signum()),
             "rand" => {
-                let max = app.pop().and_then(|x| x.int());
-                if let Some(max) = max {
-                    let num = app.rng.gen_range(0..max) as f64;
-                    app.push(StackEntry::num(num));
-                }
+                let max = app.pop().and_then(|x| x.try_as_int())?;
+                let num = app.rng.gen_range(0..max) as f64;
+                app.push(StackEntry::num(num))
             }
             "jsrand" => {
                 let num = app.rng.gen();
-                app.push(StackEntry::num(num));
+                app.push(StackEntry::num(num))
             }
             "floor" | "f" => app.fmod_1(|x| x.floor()),
             "ceil" | "c" => app.fmod_1(|x| x.ceil()),
             "not" => app.mod_1(|x| Some(StackEntry::num(!x.bool() as u8 as f64))),
             "bitnot" => app.nmod_1(|x| !x),
-            "exp" | "log" => todo!("Unclear what these do"),
+            "exp" | "log" => Err(anyhow!("Unclear what these do")),
             "sin" => app.fmod_1(|x| x.sin()),
             "cos" => app.fmod_1(|x| x.cos()),
             "bound" => {
-                if let Some([high, n, low]) = app.flt3() {
-                    app.push(StackEntry::num(n.clamp(low, high)));
-                }
+                let [high, n, low] = app.flt3()?;
+                app.push(StackEntry::num(n.clamp(low, high)))
             }
             "when" => {
-                if let Some(b) = app.pop().map(|x| x.bool()) {
-                    if !b {
-                        app.exch();
-                    }
-                    app.pop();
+                let b = app.pop().map(|x| x.bool())?;
+                if !b {
+                    app.exch()?;
                 }
+                app.pop()?;
+                Ok(())
             }
             // We can't really do it on a set.
             // Sets are of either unspecified or sorted order.
             // There is no such thing as an unsorted set with custom order (at least, that I know
             // of).
             "shuffle" => {
-                let set = app.pop();
-                if let Some(StackEntry::String(s)) = set {
-                    let mut vec = Vec::from_iter(s.split(' '));
-                    vec.shuffle(&mut app.rng);
-                    app.push(StackEntry::String(Cow::Owned(vec.join(" "))));
-                }
+                let s = app.pop().and_then(StackEntry::try_into_string)?;
+                let mut vec = Vec::from_iter(s.split(' '));
+                vec.shuffle(&mut app.rng);
+                app.push(StackEntry::String(Cow::Owned(vec.join(" "))))
             }
-            "put" => {}
-            "get" => {}
-            "dbpush" => {}
-            "dbpop" => {}
-            "dbget" => {}
-            "dblen" => {}
-            "dbat" => {}
-            "dbclr" => {}
-            "dbsave" => {}
-            "dbload" => {}
-            "dbins" => {}
-            "dbext" => {}
-            "dbread" => {}
-            "dbmov" => {}
-            "dbgoto" => {}
-            "localtime" => {
-                return_date(app, &mut |s| Local::now().format(s).to_string());
-            }
-            "gmtime" => {
-                return_date(app, &mut |s| Utc::now().format(s).to_string());
-            }
+            "put" => Err(anyhow!("TODO")),
+            "get" => Err(anyhow!("TODO")),
+            "dbpush" => Err(anyhow!("TODO")),
+            "dbpop" => Err(anyhow!("TODO")),
+            "dbget" => Err(anyhow!("TODO")),
+            "dblen" => Err(anyhow!("TODO")),
+            "dbat" => Err(anyhow!("TODO")),
+            "dbclr" => Err(anyhow!("TODO")),
+            "dbsave" => Err(anyhow!("TODO")),
+            "dbload" => Err(anyhow!("TODO")),
+            "dbins" => Err(anyhow!("TODO")),
+            "dbext" => Err(anyhow!("TODO")),
+            "dbread" => Err(anyhow!("TODO")),
+            "dbmov" => Err(anyhow!("TODO")),
+            "dbgoto" => Err(anyhow!("TODO")),
+            "localtime" => return_date(app, &mut |s| Local::now().format(s).to_string()),
+            "gmtime" => return_date(app, &mut |s| Utc::now().format(s).to_string()),
             "time" => app.push(StackEntry::Number(FloatOrd(
                 app.start_time.elapsed().as_secs_f64(),
             ))),
-            "digest" => {
-                app.mod_2(|digest_type, data| {
-                    let output = match digest_type {
-                        StackEntry::Sha256 => data.hash::<Sha256>(),
-                        StackEntry::Md4 => data.hash::<Md4>(),
-                        _ => vec![],
-                    };
-                    Some(StackEntry::String(Cow::Owned(hex::encode(output))))
-                });
-            }
+            "digest" => app.mod_2(|digest_type, data| {
+                let output = match digest_type {
+                    StackEntry::Sha256 => data.hash::<Sha256>(),
+                    StackEntry::Md4 => data.hash::<Md4>(),
+                    _ => vec![],
+                };
+                Some(StackEntry::String(Cow::Owned(hex::encode(output))))
+            }),
             "sprintf1s" => {
-                if let Some((format, arg)) = app.pop().and_then(|x| x.to_printf()).zip(app.pop()) {
-                    app.push(StackEntry::String(Cow::Owned(
-                        format.restrict(1).format(vec![Primitive::from(arg)])?,
-                    )));
+                let format = app.pop().and_then(StackEntry::to_printf)?;
+                let arg = app.pop()?;
+                app.push(StackEntry::String(Cow::Owned(
+                    format.restrict(1).format(vec![Primitive::from(arg)])?,
+                )))
+            }
+            "printf" => {
+                let format = app.pop().and_then(StackEntry::to_printf)?;
+                let mut args = Vec::new();
+                for _ in 0..format.args_needed() {
+                    args.push(Primitive::from(app.pop()?));
                 }
+                app.push(StackEntry::String(Cow::Owned(format.format(args)?)))
             }
             "clear" => {
                 app.stack_ptr = -1;
+                Ok(())
             }
-            "/MD4" => {
-                app.push(StackEntry::Md4);
-            }
-            "/SHA256" => {
-                app.push(StackEntry::Sha256);
-            }
+            "/MD4" => app.push(StackEntry::Md4),
+            "/SHA256" => app.push(StackEntry::Sha256),
             // TODO
-            "for" => {}
-            "end" => {}
-            s if s.chars().all(|x| x.is_ascii_digit() || x == '.') => match s.parse() {
-                Ok(n) => {
-                    app.push(StackEntry::num(n));
-                }
-                Err(e) => {
-                    eprintln!("Couldn't parse number `{s}`: {e}");
-                }
-            },
+            "for" => Err(anyhow!("TODO")),
+            "end" => Err(anyhow!("TODO")),
+            s if s.chars().all(|x| x.is_ascii_digit() || x == '.') => {
+                let n = s.parse()?;
+                app.push(StackEntry::Number(FloatOrd(n)))?;
+                Ok(())
+            }
             s if s.starts_with('/') => {
                 // has to be owned because of lifetime rules
                 let value = s.strip_prefix('/').unwrap().to_owned();
-                app.push(StackEntry::String(Cow::Owned(value)));
+                app.push(StackEntry::String(Cow::Owned(value)))
             }
-            s if app.cvars.contains_key(&Cow::Borrowed(s)) => {
-                app.push(app.cvars.get(&Cow::Borrowed(s)).unwrap().clone());
+            s if app.cvars.contains_key(s) => {
+                app.push(app.cvars.get(s).unwrap().clone())
             }
-            s if s.starts_with('"') && s.ends_with('"') => {
-                app.push(StackEntry::String(Cow::Owned(
-                    s[1..(s.len() - 1)].to_string(),
-                )));
+            s if s.starts_with('"') && s.ends_with('"') => app.push(StackEntry::String(
+                Cow::Owned(s[1..(s.len() - 1)].to_string()),
+            )),
+            "[" => {
+                app.start_set();
+                Ok(())
             }
-            "[" => app.start_set(),
-            "]" => app.end_set(),
-            _ => eprintln!("{}: No such token", app.name),
-        }
+            "]" => {
+                app.end_set();
+                Ok(())
+            }
+            _ => Err(anyhow!("{}: No such token", app.name)),
+        }?;
     }
     Ok(())
 }

@@ -1,8 +1,9 @@
 use std::{
     fmt::{Display, LowerHex, Octal, Pointer, UpperHex},
-    num::ParseIntError,
+    num::ParseIntError, collections::VecDeque,
 };
 
+use anyhow::Result;
 use either::Either;
 use float_ord::FloatOrd;
 use itertools::Itertools;
@@ -88,6 +89,7 @@ macro_rules! upperlower_impl {
 upperlower_impl!(HexFloat, LowerHex);
 upperlower_impl!(HexFloat, UpperHex);
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     UInt(usize),
     Int(isize),
@@ -248,7 +250,7 @@ pub enum FormatError {
 type FormatArgument = Either<String, Argument>;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Format(Vec<FormatArgument>);
+pub struct Format(pub Vec<FormatArgument>);
 
 impl Format {
     pub fn restrict(mut self, args_n: usize) -> Self {
@@ -284,10 +286,12 @@ impl Format {
         res
     }
 
-    pub fn format(mut self, mut args: Vec<Primitive>) -> Result<String, FormatError> {
+    pub fn format(self, mut args: Vec<Primitive>) -> Result<String, FormatError> {
         let mut res = String::new();
-        while !self.0.is_empty() {
-            let ex = self.0.pop().unwrap();
+        let mut expected = VecDeque::from(self.0);
+
+        while !expected.is_empty() {
+            let ex = expected.pop_front().unwrap();
             match (ex, args.is_empty()) {
                 (Either::Left(s), _) => {
                     res.push_str(&s);
@@ -301,7 +305,7 @@ impl Format {
                     } else {
                         None
                     };
-                    ex.format(gi, width, precision)?;
+                    res.push_str(&ex.format(gi, width, precision)?);
                 }
                 (Either::Right(_), true) => {
                     return Err(FormatError::Exhausted);
@@ -411,8 +415,11 @@ impl Argument {
                 }
             },
             (Specifier::Char, Primitive::Int(_) | Primitive::UInt(_) | Primitive::Char(_))
-            | (Specifier::Int | Specifier::UInt | Specifier::String, _) => {
+            | (Specifier::String, _) => {
                 format_option = Some(String::new());
+            }
+            (Specifier::Int | Specifier::UInt, _) => {
+                num_type = Some("");
             }
             (Specifier::Char, Primitive::String(s)) => {
                 format_option = Some(String::new());
@@ -434,11 +441,18 @@ impl Argument {
                 Width::Arg => width_arg.map(|x| x.to_string()).unwrap_or_default(),
                 Width::Int(i) => i.to_string(),
             };
-            format_option = Some(format!(":{precision}{width}{}", num_type));
+            let colon = if precision.is_empty() && width.is_empty() {
+                ""
+            } else {
+                ":"
+            };
+            format_option = Some(format!("{colon}{precision}{width}{}", num_type));
         }
         let _ = format_arg.get_or_insert(inp);
-        let format_arg = format_arg.expect("All cases should have been handled by now.");
-        let format_option = format_option.expect("All cases should have been handled by now.");
+        let format_arg =
+            format_arg.expect("Bug in format: All cases should have been handled by now.");
+        let format_option =
+            format_option.expect("Bug in format: All cases should have been handled by now.");
         let fmt = format!("{{format_arg{}}}", format_option);
         strfmt!(fmt.as_str(), format_arg => format_arg)
     }
@@ -492,7 +506,7 @@ pub enum Notation {
     Hex,
 }
 
-fn format_argument<'a>(s: &'a str) -> IResult<&str, FormatArgument> {
+pub fn parse_format_argument<'a>(s: &'a str) -> IResult<&str, FormatArgument> {
     match alt::<_, _, nom::error::Error<_>, _>((tag("%%"), tag("%")))(s) {
         Ok((s, lit)) if lit == "%%" => Ok((s, FormatArgument::Left(lit.to_string()))),
         Ok((s, _)) => {
@@ -552,10 +566,4 @@ fn format_argument<'a>(s: &'a str) -> IResult<&str, FormatArgument> {
             Ok((s, FormatArgument::Left(until.to_string())))
         }
     }
-}
-
-pub fn parse_printf(s: &str) -> IResult<&str, Format> {
-    let (s, out) = many0(format_argument)(s)?;
-    debug_assert!(s.is_empty());
-    Ok((s, Format(out)))
 }
